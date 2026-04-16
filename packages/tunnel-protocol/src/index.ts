@@ -46,6 +46,40 @@ export type RequestEndMessage = {
 	requestId: string;
 };
 
+export type WebSocketConnectMessage = {
+	type: "websocket-connect";
+	requestId: string;
+	url: string;
+	headers: HeaderEntry[];
+	protocols: string[];
+};
+
+export type WebSocketAcceptMessage = {
+	type: "websocket-accept";
+	requestId: string;
+	protocol?: string;
+};
+
+export type WebSocketRejectMessage = {
+	type: "websocket-reject";
+	requestId: string;
+	message: string;
+};
+
+export type WebSocketFrameMessage = {
+	type: "websocket-frame";
+	requestId: string;
+	chunk: string;
+	isBinary: boolean;
+};
+
+export type WebSocketCloseMessage = {
+	type: "websocket-close";
+	requestId: string;
+	code?: number;
+	reason: string;
+};
+
 export type ResponseStartMessage = {
 	type: "response-start";
 	requestId: string;
@@ -77,14 +111,21 @@ export type TunnelServerMessage =
 	| ErrorMessage
 	| RequestStartMessage
 	| RequestBodyMessage
-	| RequestEndMessage;
+	| RequestEndMessage
+	| WebSocketConnectMessage
+	| WebSocketFrameMessage
+	| WebSocketCloseMessage;
 
 export type TunnelClientMessage =
 	| ErrorMessage
 	| ResponseStartMessage
 	| ResponseBodyMessage
 	| ResponseEndMessage
-	| ResponseErrorMessage;
+	| ResponseErrorMessage
+	| WebSocketAcceptMessage
+	| WebSocketRejectMessage
+	| WebSocketFrameMessage
+	| WebSocketCloseMessage;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -189,6 +230,25 @@ function isTunnelServerMessage(
 			return isString(value.requestId) && isString(value.chunk);
 		case "request-end":
 			return isString(value.requestId);
+			case "websocket-connect":
+				return (
+					isString(value.requestId) &&
+					isString(value.url) &&
+					isHeaderEntries(value.headers) &&
+					isStringArray(value.protocols)
+				);
+			case "websocket-frame":
+				return (
+					isString(value.requestId) &&
+					isString(value.chunk) &&
+					typeof value.isBinary === "boolean"
+				);
+			case "websocket-close":
+				return (
+					isString(value.requestId) &&
+					isOptionalNumber(value.code) &&
+					isString(value.reason)
+				);
 		default:
 			return false;
 	}
@@ -214,6 +274,22 @@ function isTunnelClientMessage(
 			return isString(value.requestId);
 		case "response-error":
 			return isString(value.requestId) && isString(value.message);
+			case "websocket-accept":
+				return isString(value.requestId) && isOptionalString(value.protocol);
+			case "websocket-reject":
+				return isString(value.requestId) && isString(value.message);
+			case "websocket-frame":
+				return (
+					isString(value.requestId) &&
+					isString(value.chunk) &&
+					typeof value.isBinary === "boolean"
+				);
+			case "websocket-close":
+				return (
+					isString(value.requestId) &&
+					isOptionalNumber(value.code) &&
+					isString(value.reason)
+				);
 		default:
 			return false;
 	}
@@ -250,10 +326,22 @@ function isHeaderEntry(value: unknown): value is HeaderEntry {
 	);
 }
 
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(isString);
+}
+
 function isJsonRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null;
 }
 
 function isString(value: unknown): value is string {
 	return typeof value === "string";
+}
+
+function isOptionalNumber(value: unknown): value is number | undefined {
+	return value === undefined || typeof value === "number";
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+	return value === undefined || isString(value);
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import type { IncomingMessage } from "node:http";
 import {
 	buildTunnelRefreshPath,
 	type CreateTunnelResponse,
@@ -11,9 +12,11 @@ import {
 	type RequestStartMessage,
 	TUNNELS_API_PATH,
 	type TunnelClientMessage,
+	type WebSocketConnectMessage,
 } from "@hostc/tunnel-protocol";
 import chalk from "chalk";
 import { Command, InvalidArgumentError } from "commander";
+import { type RawData, WebSocket as LocalWebSocket } from "ws";
 
 type HttpCommandOptions = {
 	localHost: string;
@@ -34,6 +37,13 @@ type LocalRequestContext = {
 	abortController: AbortController;
 	writer: WritableStreamDefaultWriter<Uint8Array> | null;
 	writeChain: Promise<void>;
+};
+
+type LocalWebSocketContext = {
+	socket: LocalWebSocket;
+	opened: boolean;
+	remoteClosed: boolean;
+	handshakeSettled: boolean;
 };
 
 type Spinner = {
@@ -69,8 +79,10 @@ const DEFAULT_SERVER = "https://hostc.dev";
 const SPINNER_FRAMES = ["-", "\\", "|", "/"];
 const SESSION_REFRESH_INTERVAL_MS = 5 * 60_000;
 const SESSION_REFRESH_RETRY_MS = 30_000;
+const DEFAULT_WEBSOCKET_CLOSE_CODE = 1011;
+const TUNNEL_REPLACED_CLOSE_CODE = 1012;
 
-const HOP_BY_HOP_HEADERS = new Set([
+const HTTP_HOP_BY_HOP_HEADERS = new Set([
 	"connection",
 	"keep-alive",
 	"proxy-authenticate",
@@ -82,16 +94,24 @@ const HOP_BY_HOP_HEADERS = new Set([
 	"host",
 ]);
 
+const LOCAL_WEBSOCKET_HEADER_EXCLUSIONS = new Set([
+	...HTTP_HOP_BY_HOP_HEADERS,
+	"sec-websocket-extensions",
+	"sec-websocket-key",
+	"sec-websocket-protocol",
+	"sec-websocket-version",
+]);
+
 async function main(): Promise<void> {
 	const program = new Command()
 		.name("hostc")
-		.description("Expose local HTTP services through a hostc tunnel")
+		.description("Expose local HTTP and WebSocket services through a hostc tunnel")
 		.version("0.0.0")
 		.showHelpAfterError();
 
 	program
 		.command("http")
-		.description("Expose a local HTTP server")
+		.description("Expose a local HTTP or WebSocket server")
 		.argument("<port>", "local port to expose", parsePort)
 		.option(
 			"--server <url>",
@@ -560,6 +580,7 @@ async function openTunnelConnection(options: {
 }): Promise<ConnectionOutcome> {
 	const tunnelSocket = new WebSocket(options.tunnel.websocketUrl);
 	const localRequests = new Map<string, LocalRequestContext>();
+	const localSockets = new Map<string, LocalWebSocketContext>();
 	let opened = false;
 	let ready = false;
 
@@ -597,6 +618,11 @@ async function openTunnelConnection(options: {
 
 		tunnelSocket.addEventListener("close", (event) => {
 			abortLocalRequests(localRequests);
+			closeLocalWebSockets(
+				localSockets,
+				TUNNEL_REPLACED_CLOSE_CODE,
+				"Tunnel connection closed",
+			);
 			options.registerSocket(null);
 
 			if (options.interrupted()) {
@@ -690,14 +716,42 @@ async function openTunnelConnection(options: {
 					);
 					return;
 				}
+
+				case "websocket-connect":
+					try {
+						startLocalWebSocket(message);
+					} catch (error) {
+						sendMessage({
+							type: "websocket-reject",
+							requestId: message.requestId,
+							message: formatError(error),
+						});
+					}
+					return;
+
+				case "websocket-frame":
+					forwardFrameToLocalWebSocket(
+						message.requestId,
+						message.chunk,
+						message.isBinary,
+					);
+					return;
+
+				case "websocket-close":
+					closeLocalWebSocket(
+						message.requestId,
+						message.code,
+						message.reason,
+					);
+					return;
+				}
 			}
-		}
 
 		async function startLocalRequest(
 			message: RequestStartMessage,
 		): Promise<void> {
 			const proxyUrl = new URL(message.url, options.localOrigin);
-			const proxyHeaders = new Headers(stripHopByHopHeaders(message.headers));
+			const proxyHeaders = new Headers(stripHttpHopByHopHeaders(message.headers));
 			const abortController = new AbortController();
 
 			let bodyStream: ReadableStream<Uint8Array> | undefined;
@@ -774,6 +828,158 @@ async function openTunnelConnection(options: {
 			}
 		}
 
+		function startLocalWebSocket(message: WebSocketConnectMessage): void {
+			const proxyUrl = buildLocalWebSocketUrl(options.localOrigin, message.url);
+			const localSocket = new LocalWebSocket(proxyUrl, message.protocols, {
+				headers: headersToNodeRecord(
+					stripLocalWebSocketHeaders(message.headers),
+				),
+			});
+			const socketContext: LocalWebSocketContext = {
+				socket: localSocket,
+				opened: false,
+				remoteClosed: false,
+				handshakeSettled: false,
+			};
+
+			localSockets.set(message.requestId, socketContext);
+
+			const rejectHandshake = (reason: string): void => {
+				if (socketContext.handshakeSettled) {
+					return;
+				}
+
+				socketContext.handshakeSettled = true;
+				localSockets.delete(message.requestId);
+				sendMessage({
+					type: "websocket-reject",
+					requestId: message.requestId,
+					message: reason,
+				});
+			};
+
+			localSocket.once("open", () => {
+				socketContext.opened = true;
+				socketContext.handshakeSettled = true;
+				sendMessage({
+					type: "websocket-accept",
+					requestId: message.requestId,
+					protocol: localSocket.protocol || undefined,
+				});
+			});
+
+			localSocket.on("message", (data: RawData, isBinary: boolean) => {
+				sendMessage({
+					type: "websocket-frame",
+					requestId: message.requestId,
+					chunk: encodeBase64(rawDataToBuffer(data)),
+					isBinary,
+				});
+			});
+
+			localSocket.once(
+				"unexpected-response",
+				(_request, response: IncomingMessage) => {
+					rejectHandshake(formatUnexpectedWebSocketResponse(response));
+					response.resume();
+					localSocket.terminate();
+				},
+			);
+
+			localSocket.on("error", (error) => {
+				if (!socketContext.handshakeSettled) {
+					rejectHandshake(formatError(error));
+				}
+			});
+
+			localSocket.on("close", (code, reasonBuffer) => {
+				const reason = Buffer.from(reasonBuffer).toString("utf8");
+				const wasOpened = socketContext.opened;
+				const handshakeSettled = socketContext.handshakeSettled;
+				const remoteClosed = socketContext.remoteClosed;
+
+				localSockets.delete(message.requestId);
+
+				if (!wasOpened && !handshakeSettled) {
+					rejectHandshake(formatLocalWebSocketClose(code, reason));
+					return;
+				}
+
+				if (!wasOpened || remoteClosed) {
+					return;
+				}
+
+				sendMessage({
+					type: "websocket-close",
+					requestId: message.requestId,
+					code,
+					reason,
+				});
+			});
+		}
+
+		function forwardFrameToLocalWebSocket(
+			requestId: string,
+			chunk: string,
+			isBinary: boolean,
+		): void {
+			const socketContext = localSockets.get(requestId);
+
+			if (!socketContext || socketContext.socket.readyState !== LocalWebSocket.OPEN) {
+				return;
+			}
+
+			socketContext.socket.send(
+				isBinary ? decodeBase64(chunk) : decodeTextBase64(chunk),
+				{ binary: isBinary },
+				(error) => {
+					if (!error) {
+						return;
+					}
+
+					console.error(
+						chalk.yellow(
+							`Failed to forward WebSocket frame for ${requestId}: ${formatError(error)}`,
+						),
+					);
+
+					if (socketContext.socket.readyState === LocalWebSocket.OPEN) {
+						socketContext.socket.close(
+							DEFAULT_WEBSOCKET_CLOSE_CODE,
+							"Failed to forward WebSocket frame",
+						);
+					}
+				},
+			);
+		}
+
+		function closeLocalWebSocket(
+			requestId: string,
+			code: number | undefined,
+			reason: string,
+		): void {
+			const socketContext = localSockets.get(requestId);
+
+			if (!socketContext) {
+				return;
+			}
+
+			socketContext.remoteClosed = true;
+
+			if (
+				socketContext.socket.readyState === LocalWebSocket.CLOSING ||
+				socketContext.socket.readyState === LocalWebSocket.CLOSED
+			) {
+				localSockets.delete(requestId);
+				return;
+			}
+
+			socketContext.socket.close(
+				normalizeWebSocketCloseCode(code),
+				normalizeWebSocketCloseReason(reason),
+			);
+		}
+
 		function sendMessage(message: TunnelClientMessage): void {
 			if (tunnelSocket.readyState !== WebSocket.OPEN) {
 				return;
@@ -814,9 +1020,37 @@ function abortLocalRequests(
 	}
 }
 
-function stripHopByHopHeaders(headers: HeaderEntry[]): HeaderEntry[] {
+function closeLocalWebSockets(
+	localSockets: Map<string, LocalWebSocketContext>,
+	code: number,
+	reason: string,
+): void {
+	for (const socketContext of localSockets.values()) {
+		socketContext.remoteClosed = true;
+
+		if (
+			socketContext.socket.readyState === LocalWebSocket.CONNECTING ||
+			socketContext.socket.readyState === LocalWebSocket.OPEN
+		) {
+			socketContext.socket.close(
+				normalizeWebSocketCloseCode(code),
+				normalizeWebSocketCloseReason(reason),
+			);
+		}
+	}
+
+	localSockets.clear();
+}
+
+function stripHttpHopByHopHeaders(headers: HeaderEntry[]): HeaderEntry[] {
 	return headers.filter(
-		([name]) => !HOP_BY_HOP_HEADERS.has(name.toLowerCase()),
+		([name]) => !HTTP_HOP_BY_HOP_HEADERS.has(name.toLowerCase()),
+	);
+}
+
+function stripLocalWebSocketHeaders(headers: HeaderEntry[]): HeaderEntry[] {
+	return headers.filter(
+		([name]) => !LOCAL_WEBSOCKET_HEADER_EXCLUSIONS.has(name.toLowerCase()),
 	);
 }
 
@@ -824,12 +1058,31 @@ function headersToEntries(headers: Headers): HeaderEntry[] {
 	const responseHeaders: HeaderEntry[] = [];
 
 	for (const [name, value] of headers) {
-		if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
+		if (!HTTP_HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
 			responseHeaders.push([name, value]);
 		}
 	}
 
 	return responseHeaders;
+}
+
+function headersToNodeRecord(headers: HeaderEntry[]): Record<string, string> {
+	const result: Record<string, string> = {};
+
+	for (const [name, value] of headers) {
+		const existingValue = result[name];
+		result[name] = existingValue ? `${existingValue}, ${value}` : value;
+	}
+
+	return result;
+}
+
+function buildLocalWebSocketUrl(localOrigin: URL, path: string): string {
+	const proxyUrl = new URL(path, localOrigin);
+
+	proxyUrl.protocol = proxyUrl.protocol === "https:" ? "wss:" : "ws:";
+
+	return proxyUrl.toString();
 }
 
 function encodeBase64(bytes: Uint8Array): string {
@@ -838,6 +1091,61 @@ function encodeBase64(bytes: Uint8Array): string {
 
 function decodeBase64(value: string): Uint8Array {
 	return Buffer.from(value, "base64");
+}
+
+function decodeTextBase64(value: string): string {
+	return Buffer.from(value, "base64").toString("utf8");
+}
+
+function rawDataToBuffer(value: RawData): Buffer {
+	if (Array.isArray(value)) {
+		return Buffer.concat(value.map((chunk) => Buffer.from(chunk)));
+	}
+
+	if (value instanceof ArrayBuffer) {
+		return Buffer.from(new Uint8Array(value));
+	}
+
+	return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function normalizeWebSocketCloseCode(code?: number): number {
+	if (
+		typeof code === "number" &&
+		((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+			(code >= 3000 && code <= 4999))
+	) {
+		return code;
+	}
+
+	return DEFAULT_WEBSOCKET_CLOSE_CODE;
+}
+
+function normalizeWebSocketCloseReason(reason: string): string {
+	if (!reason) {
+		return "Tunnel closed";
+	}
+
+	return reason.slice(0, 123);
+}
+
+function formatUnexpectedWebSocketResponse(response: IncomingMessage): string {
+	const statusCode = response.statusCode ?? 502;
+	const statusMessage = response.statusMessage?.trim();
+
+	if (statusMessage) {
+		return `Local WebSocket service rejected the upgrade (${statusCode} ${statusMessage})`;
+	}
+
+	return `Local WebSocket service rejected the upgrade (${statusCode})`;
+}
+
+function formatLocalWebSocketClose(code: number, reason: string): string {
+	if (reason) {
+		return `Local WebSocket connection closed during handshake (${code}: ${reason})`;
+	}
+
+	return `Local WebSocket connection closed during handshake (${code})`;
 }
 
 function formatError(error: unknown): string {
