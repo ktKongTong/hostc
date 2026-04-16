@@ -1,31 +1,17 @@
-import { Buffer } from "node:buffer";
+import { createSignedToken, verifySignedToken } from "./signed-token";
 
 const CONNECT_TOKEN_TTL_MS = 60_000;
 const CONNECT_TOKEN_VERSION = 1;
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
-type ConnectTokenPayload = {
-	v: number;
-	subdomain: string;
-	exp: number;
-	nonce: string;
+const CONNECT_TOKEN_OPTIONS = {
+	ttlMs: CONNECT_TOKEN_TTL_MS,
+	version: CONNECT_TOKEN_VERSION,
 };
 
 export async function createConnectToken(
 	secret: string,
 	subdomain: string,
 ): Promise<string> {
-	const payload: ConnectTokenPayload = {
-		v: CONNECT_TOKEN_VERSION,
-		subdomain,
-		exp: Date.now() + CONNECT_TOKEN_TTL_MS,
-		nonce: crypto.randomUUID(),
-	};
-	const encodedPayload = encodeBase64Url(JSON.stringify(payload));
-	const signature = await signPayload(secret, encodedPayload);
-
-	return `${encodedPayload}.${signature}`;
+	return createSignedToken(secret, subdomain, CONNECT_TOKEN_OPTIONS);
 }
 
 export async function verifyConnectToken(
@@ -33,97 +19,5 @@ export async function verifyConnectToken(
 	subdomain: string,
 	token: string,
 ): Promise<boolean> {
-	const [encodedPayload, encodedSignature, ...rest] = token.split(".");
-
-	if (!encodedPayload || !encodedSignature || rest.length > 0) {
-		return false;
-	}
-
-	const payload = parsePayload(encodedPayload);
-
-	if (!payload) {
-		return false;
-	}
-
-	if (
-		payload.v !== CONNECT_TOKEN_VERSION ||
-		payload.subdomain !== subdomain ||
-		payload.exp < Date.now()
-	) {
-		return false;
-	}
-
-	const key = await importConnectTokenKey(secret);
-
-	return crypto.subtle.verify(
-		"HMAC",
-		key,
-		decodeBase64Url(encodedSignature),
-		encoder.encode(encodedPayload),
-	);
-}
-
-function parsePayload(encodedPayload: string): ConnectTokenPayload | null {
-	try {
-		const parsed = JSON.parse(
-			decoder.decode(decodeBase64Url(encodedPayload)),
-		) as unknown;
-
-		if (!isConnectTokenPayload(parsed)) {
-			return null;
-		}
-
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-function isConnectTokenPayload(value: unknown): value is ConnectTokenPayload {
-	if (!isJsonRecord(value)) {
-		return false;
-	}
-
-	return (
-		typeof value.v === "number" &&
-		typeof value.subdomain === "string" &&
-		typeof value.exp === "number" &&
-		typeof value.nonce === "string"
-	);
-}
-
-function isJsonRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-async function signPayload(
-	secret: string,
-	encodedPayload: string,
-): Promise<string> {
-	const key = await importConnectTokenKey(secret);
-	const signature = await crypto.subtle.sign(
-		"HMAC",
-		key,
-		encoder.encode(encodedPayload),
-	);
-
-	return encodeBase64Url(new Uint8Array(signature));
-}
-
-function importConnectTokenKey(secret: string): Promise<CryptoKey> {
-	return crypto.subtle.importKey(
-		"raw",
-		encoder.encode(secret),
-		{ name: "HMAC", hash: "SHA-256" },
-		false,
-		["sign", "verify"],
-	);
-}
-
-function encodeBase64Url(value: Uint8Array | string): string {
-	return Buffer.from(value).toString("base64url");
-}
-
-function decodeBase64Url(value: string): Uint8Array {
-	return Buffer.from(value, "base64url");
+	return verifySignedToken(secret, subdomain, token, CONNECT_TOKEN_OPTIONS);
 }

@@ -7,7 +7,14 @@
 	},
 	"files": {
 		"ignoreUnknown": false,
-		"includes": ["**", "!!.pnpm-store", "!!**/dist", "!!**/coverage", "!!**/.wrangler"]
+		"includes": [
+			"**",
+			"!apps/workers/worker-configuration.d.ts",
+			"!!.pnpm-store",
+			"!!**/dist",
+			"!!**/coverage",
+			"!!**/.wrangler"
+		]
 	},
 	"formatter": {
 		"enabled": true,

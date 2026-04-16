@@ -81,16 +81,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
 async function createTunnel(env: Env, requestUrl: URL): Promise<Response> {
 	const subdomain = createRandomSubdomain();
-	const [connectToken, sessionToken] = await Promise.all([
-		createConnectToken(env.TOKEN_SECRET, subdomain),
-		createSessionToken(env.TOKEN_SECRET, subdomain),
-	]);
+	const tunnelSession = await issueTunnelSession(env, requestUrl, subdomain);
 	const response: CreateTunnelResponse = {
 		tunnelId: subdomain,
 		subdomain,
 		publicUrl: buildPublicUrl(env.PUBLIC_BASE_DOMAIN, subdomain),
-		websocketUrl: buildTunnelWebSocketUrl(requestUrl, subdomain, connectToken),
-		sessionToken,
+		websocketUrl: tunnelSession.websocketUrl,
+		sessionToken: tunnelSession.sessionToken,
 	};
 
 	return Response.json(response, { status: 201 });
@@ -114,16 +111,7 @@ async function refreshTunnelSession(
 		return jsonError("Invalid session token", 403);
 	}
 
-	const [connectToken, refreshedSessionToken] = await Promise.all([
-		createConnectToken(env.TOKEN_SECRET, subdomain),
-		createSessionToken(env.TOKEN_SECRET, subdomain),
-	]);
-	const response: RefreshTunnelSessionResponse = {
-		websocketUrl: buildTunnelWebSocketUrl(requestUrl, subdomain, connectToken),
-		sessionToken: refreshedSessionToken,
-	};
-
-	return Response.json(response);
+	return Response.json(await issueTunnelSession(env, requestUrl, subdomain));
 }
 
 async function connectTunnel(
@@ -169,6 +157,22 @@ function matchTunnelRouteId(pathname: string, suffix: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+async function issueTunnelSession(
+	env: Env,
+	requestUrl: URL,
+	subdomain: string,
+): Promise<RefreshTunnelSessionResponse> {
+	const [connectToken, sessionToken] = await Promise.all([
+		createConnectToken(env.TOKEN_SECRET, subdomain),
+		createSessionToken(env.TOKEN_SECRET, subdomain),
+	]);
+
+	return {
+		websocketUrl: buildTunnelWebSocketUrl(requestUrl, subdomain, connectToken),
+		sessionToken,
+	};
 }
 
 function getBearerToken(request: Request): string {

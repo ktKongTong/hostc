@@ -441,26 +441,15 @@ function buildRefreshTunnelUrl(server: string, tunnelId: string): string {
 }
 
 async function createTunnel(server: string): Promise<CreateTunnelResponse> {
-	const response = await fetch(buildCreateTunnelUrl(server), {
-		method: "POST",
+	return requestTunnelJson({
+		action: "create tunnel",
+		invalidResponseMessage: "Received an invalid create tunnel response",
+		parse: parseCreateTunnelResponse,
+		url: buildCreateTunnelUrl(server),
+		init: {
+			method: "POST",
+		},
 	});
-
-	const rawBody = await response.text();
-
-	if (!response.ok) {
-		throw new Error(
-			parseErrorMessage(rawBody) ??
-				`Failed to create tunnel (${response.status})`,
-		);
-	}
-
-	const createdTunnel = parseCreateTunnelResponse(rawBody);
-
-	if (!createdTunnel) {
-		throw new Error("Received an invalid create tunnel response");
-	}
-
-	return createdTunnel;
 }
 
 async function refreshTunnelSession(
@@ -468,29 +457,44 @@ async function refreshTunnelSession(
 	tunnelId: string,
 	sessionToken: string,
 ): Promise<RefreshTunnelSessionResponse> {
-	const response = await fetch(buildRefreshTunnelUrl(server, tunnelId), {
-		method: "POST",
-		headers: {
-			authorization: `Bearer ${sessionToken}`,
+	return requestTunnelJson({
+		action: "refresh tunnel session",
+		invalidResponseMessage: "Received an invalid refresh tunnel response",
+		parse: parseRefreshTunnelSessionResponse,
+		url: buildRefreshTunnelUrl(server, tunnelId),
+		init: {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${sessionToken}`,
+			},
 		},
 	});
+}
 
+async function requestTunnelJson<T>(options: {
+	action: string;
+	invalidResponseMessage: string;
+	parse: (raw: string) => T | null;
+	url: string;
+	init?: RequestInit;
+}): Promise<T> {
+	const response = await fetch(options.url, options.init);
 	const rawBody = await response.text();
 
 	if (!response.ok) {
 		throw new Error(
 			parseErrorMessage(rawBody) ??
-				`Failed to refresh tunnel session (${response.status})`,
+				`Failed to ${options.action} (${response.status})`,
 		);
 	}
 
-	const refreshedSession = parseRefreshTunnelSessionResponse(rawBody);
+	const parsed = options.parse(rawBody);
 
-	if (!refreshedSession) {
-		throw new Error("Received an invalid refresh tunnel response");
+	if (!parsed) {
+		throw new Error(options.invalidResponseMessage);
 	}
 
-	return refreshedSession;
+	return parsed;
 }
 
 function startSessionRefreshLoop(options: {
