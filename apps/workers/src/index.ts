@@ -8,6 +8,7 @@ import {
 import { HostcDurableObject } from "./durable/tunnel";
 import { createConnectToken, verifyConnectToken } from "./lib/connect-token";
 import { createSessionToken, verifySessionToken } from "./lib/session-token";
+import { canServeStaticAsset, serveStaticAsset } from "./lib/static-site";
 import {
 	buildTunnelWebSocketUrl,
 	createRandomSubdomain,
@@ -70,8 +71,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 		return proxyTunnelRequest(request, env, tunnelSubdomain);
 	}
 
-	if (request.method === "GET" && url.pathname === "/") {
-		return createInfoResponse(env.PUBLIC_BASE_DOMAIN);
+	if (url.hostname === env.PUBLIC_BASE_DOMAIN && canServeStaticAsset(request)) {
+		return serveStaticAsset(request, env);
 	}
 
 	return new Response("Not Found", {
@@ -193,15 +194,6 @@ function proxyTunnelRequest(
 ): Promise<Response> {
 	const tunnelStub = env.HOSTC_DURABLE_OBJECT.getByName(tunnelSubdomain);
 	return tunnelStub.fetch(request);
-}
-
-function createInfoResponse(publicBaseDomain: string): Response {
-	return Response.json({
-		name: "hostc",
-		createTunnelPath: TUNNELS_API_PATH,
-		publicBaseDomain,
-		message: `Create a tunnel and route public traffic through subdomain.${publicBaseDomain}`,
-	});
 }
 
 function jsonError(message: string, status: number): Response {

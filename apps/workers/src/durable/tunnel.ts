@@ -9,6 +9,10 @@ import {
 	type TunnelServerMessage,
 	type WebSocketAcceptMessage,
 } from "@hostc/tunnel-protocol";
+import {
+	serveServiceUnavailablePage,
+	wantsHtmlResponse,
+} from "../lib/static-site";
 
 const HTTP_HOP_BY_HOP_HEADERS = new Set([
 	"connection",
@@ -196,7 +200,8 @@ export class HostcDurableObject extends DurableObject<Env> {
 	private handleTunnelConnection(): Response {
 		const subdomain = this.getTunnelSubdomain();
 		const { 0: clientSocket, 1: serverSocket } = new WebSocketPair();
-		const existingConnections = this.ctx.getWebSockets(CONTROL_SOCKET_TAG).length;
+		const existingConnections =
+			this.ctx.getWebSockets(CONTROL_SOCKET_TAG).length;
 
 		if (existingConnections > 0) {
 			logInfo("tunnel.replaced", {
@@ -233,7 +238,7 @@ export class HostcDurableObject extends DurableObject<Env> {
 		const tunnelSocket = this.getTunnelSocket();
 
 		if (!tunnelSocket) {
-			return jsonError("No active tunnel is connected for this subdomain", 502);
+			return this.createUnavailableTunnelResponse(request, 503);
 		}
 
 		const requestUrl = new URL(request.url);
@@ -310,6 +315,7 @@ export class HostcDurableObject extends DurableObject<Env> {
 			});
 		} catch (error) {
 			const requestError = asError(error);
+			const status = requestError.message.startsWith("Timed out") ? 504 : 503;
 
 			logError("proxy.request_failed", {
 				requestId,
@@ -319,15 +325,21 @@ export class HostcDurableObject extends DurableObject<Env> {
 			this.pendingResponses.delete(requestId);
 			pendingResponse.controller?.error(requestError);
 
-			return jsonError(requestError.message, 502);
+			return this.createUnavailableTunnelResponse(
+				request,
+				status,
+				requestError.message,
+			);
 		}
 	}
 
-	private async handleWebSocketProxyRequest(request: Request): Promise<Response> {
+	private async handleWebSocketProxyRequest(
+		request: Request,
+	): Promise<Response> {
 		const tunnelSocket = this.getTunnelSocket();
 
 		if (!tunnelSocket) {
-			return jsonError("No active tunnel is connected for this subdomain", 502);
+			return jsonError("No active tunnel is connected for this subdomain", 503);
 		}
 
 		const requestUrl = new URL(request.url);
@@ -397,6 +409,18 @@ export class HostcDurableObject extends DurableObject<Env> {
 		} finally {
 			this.pendingUpgrades.delete(requestId);
 		}
+	}
+
+	private createUnavailableTunnelResponse(
+		request: Request,
+		status: number,
+		message = "No active tunnel is connected for this subdomain",
+	): Promise<Response> | Response {
+		if (wantsHtmlResponse(request)) {
+			return serveServiceUnavailablePage(request, this.env, status);
+		}
+
+		return jsonError(message, status);
 	}
 
 	private handleTunnelMessage(message: TunnelClientMessage): void {
@@ -556,7 +580,11 @@ export class HostcDurableObject extends DurableObject<Env> {
 		const activeProxySocket = this.getActiveProxySocket(requestId);
 		const tunnelSocket = this.getTunnelSocket();
 
-		if (!activeProxySocket || !tunnelSocket || tunnelSocket.readyState !== WebSocket.OPEN) {
+		if (
+			!activeProxySocket ||
+			!tunnelSocket ||
+			tunnelSocket.readyState !== WebSocket.OPEN
+		) {
 			if (activeProxySocket && isSocketWritable(activeProxySocket.socket)) {
 				activeProxySocket.remoteClosed = true;
 				activeProxySocket.socket.close(
@@ -591,7 +619,11 @@ export class HostcDurableObject extends DurableObject<Env> {
 
 		this.activeProxySockets.delete(requestId);
 
-		if (remoteClosed || !tunnelSocket || tunnelSocket.readyState !== WebSocket.OPEN) {
+		if (
+			remoteClosed ||
+			!tunnelSocket ||
+			tunnelSocket.readyState !== WebSocket.OPEN
+		) {
 			return;
 		}
 
@@ -613,7 +645,10 @@ export class HostcDurableObject extends DurableObject<Env> {
 		const activeSocket = sockets[sockets.length - 1];
 
 		for (const socket of sockets.slice(0, -1)) {
-			socket.close(TUNNEL_REPLACED_CLOSE_CODE, "Replaced by a newer tunnel connection");
+			socket.close(
+				TUNNEL_REPLACED_CLOSE_CODE,
+				"Replaced by a newer tunnel connection",
+			);
 		}
 
 		return activeSocket;
@@ -650,7 +685,10 @@ export class HostcDurableObject extends DurableObject<Env> {
 
 	private disconnectExistingClients(): void {
 		for (const socket of this.ctx.getWebSockets(CONTROL_SOCKET_TAG)) {
-			socket.close(TUNNEL_REPLACED_CLOSE_CODE, "Replaced by a newer tunnel connection");
+			socket.close(
+				TUNNEL_REPLACED_CLOSE_CODE,
+				"Replaced by a newer tunnel connection",
+			);
 		}
 	}
 
@@ -737,7 +775,9 @@ export class HostcDurableObject extends DurableObject<Env> {
 			return null;
 		}
 
-		const requestTag = tags.find((tag) => tag.startsWith(PROXY_REQUEST_TAG_PREFIX));
+		const requestTag = tags.find((tag) =>
+			tag.startsWith(PROXY_REQUEST_TAG_PREFIX),
+		);
 
 		if (!requestTag) {
 			return null;
@@ -772,7 +812,10 @@ function getForwardHttpHeaders(request: Request): HeaderEntry[] {
 
 function getForwardWebSocketHeaders(request: Request): HeaderEntry[] {
 	return [
-		...buildForwardHeaders(request, WEBSOCKET_FORWARD_HEADER_EXCLUSIONS).entries(),
+		...buildForwardHeaders(
+			request,
+			WEBSOCKET_FORWARD_HEADER_EXCLUSIONS,
+		).entries(),
 	];
 }
 
@@ -915,7 +958,11 @@ function isSocketWritable(socket: WebSocket): boolean {
 function normalizeWebSocketCloseCode(code?: number): number {
 	if (
 		typeof code === "number" &&
-		((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+		((code >= 1000 &&
+			code <= 1014 &&
+			code !== 1004 &&
+			code !== 1005 &&
+			code !== 1006) ||
 			(code >= 3000 && code <= 4999))
 	) {
 		return code;
