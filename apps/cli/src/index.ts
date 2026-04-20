@@ -14,6 +14,7 @@ import {
 	TUNNELS_API_PATH,
 	type TunnelClientMessage,
 	type WebSocketConnectMessage,
+	SUBDOMAIN_PATTERN,
 } from "@hostc/tunnel-protocol";
 import chalk from "chalk";
 import { Command, InvalidArgumentError } from "commander";
@@ -23,12 +24,14 @@ import { WebSocket as LocalWebSocket, type RawData } from "ws";
 type HttpCommandOptions = {
 	localHost: string;
 	qr: boolean;
+	subdomain: string;
 };
 
 type HttpTunnelOptions = {
 	port: number;
 	localHost: string;
 	qr: boolean;
+	subdomain: string;
 };
 
 type RequestInitWithDuplex = RequestInit & {
@@ -124,7 +127,7 @@ async function main(): Promise<void> {
 
 		.argument("<port>", "local port to expose", parsePort)
 		.option(
-			"--local-host <host>",
+			"-h, --local-host <host>",
 			"Host of the local service",
 			parseLocalHost,
 			"127.0.0.1",
@@ -134,12 +137,18 @@ async function main(): Promise<void> {
 			"Show a scannable QR code for the public URL when stdout is a TTY",
 			false,
 		)
-		.addHelpText("after", "\nExamples:\n  hostc 3000\n  hostc 3000 --qr\n")
+		.option(
+			"-d, --subdomain <subdomain-prefix>",
+			"custom subdomain prefix",
+			parseSubDomainPrefix
+		)
+		.addHelpText("after", "\nExamples:\n  hostc 3000\n  hostc 3000 --qr\n hostc 3000 --subdomain yourcustomsubdomain")
 		.action(async (port: number, options: HttpCommandOptions) => {
 			await runHttpTunnel({
 				port,
 				localHost: options.localHost,
 				qr: options.qr,
+				subdomain: options.subdomain,
 			});
 		});
 
@@ -165,7 +174,7 @@ async function runHttpTunnel(options: HttpTunnelOptions): Promise<void> {
 	spinner.start();
 
 	try {
-		tunnel = await createTunnel(tunnelServer);
+		tunnel = await createTunnel(tunnelServer, options.subdomain);
 		spinner.update(
 			`Connecting tunnel ${tunnel.subdomain} -> ${localOrigin.href}`,
 		);
@@ -369,6 +378,18 @@ function resolveTunnelServerUrl(): string {
 	);
 }
 
+
+
+function parseSubDomainPrefix(v: string): string {
+	const trimmed = v.trim();
+
+	if(!SUBDOMAIN_PATTERN.test(trimmed)) {
+		throw new InvalidArgumentError("subdomain must be 1-63 characters long, containing only letters, numbers, and hyphens. Hyphens cannot be the first or last character.");
+	}
+
+	return trimmed;
+}
+
 function parseLocalHost(value: string): string {
 	const trimmed = value.trim();
 
@@ -502,11 +523,15 @@ function invokeOptionalCallback(callback: (() => void) | null): void {
 	}
 }
 
-function buildCreateTunnelUrl(server: string): string {
+function buildCreateTunnelUrl(server: string, subdomain?: string): string {
 	const serverUrl = new URL(server);
 
 	serverUrl.pathname = TUNNELS_API_PATH;
 	serverUrl.search = "";
+
+  if (subdomain) {
+    serverUrl.searchParams.set("subdomain", subdomain);
+  }
 
 	return serverUrl.toString();
 }
@@ -519,12 +544,12 @@ function buildRefreshTunnelUrl(server: string, tunnelId: string): string {
 	return serverUrl.toString();
 }
 
-async function createTunnel(server: string): Promise<CreateTunnelResponse> {
+async function createTunnel(server: string, subdomain?: string): Promise<CreateTunnelResponse> {
 	return requestTunnelJson({
 		action: "create tunnel",
 		invalidResponseMessage: "Received an invalid create tunnel response",
 		parse: parseCreateTunnelResponse,
-		url: buildCreateTunnelUrl(server),
+		url: buildCreateTunnelUrl(server, subdomain),
 		init: {
 			method: "POST",
 		},

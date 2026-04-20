@@ -149,7 +149,7 @@ export type TunnelClientMessage =
 
 type JsonRecord = Record<string, unknown>;
 
-const SUBDOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export const SUBDOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function normalizeSubdomain(value: string): string | null {
 	const normalized = value.trim().toLowerCase();

@@ -15,6 +15,7 @@ import {
 	serveTunnelNotFoundPage,
 	wantsHtmlResponse,
 } from "../lib/static-site";
+import { getSubdomainKey } from "../lib/tunnels";
 
 const HTTP_HOP_BY_HOP_HEADERS = new Set([
 	"connection",
@@ -245,6 +246,7 @@ export class HostcDurableObject extends DurableObject<Env> {
 			TUNNEL_REPLACED_CLOSE_CODE,
 			"Tunnel connection closed",
 		);
+		await this.removeSubdomainKeyFromKV();
 	}
 
 	async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
@@ -272,6 +274,7 @@ export class HostcDurableObject extends DurableObject<Env> {
 			TUNNEL_ERROR_CLOSE_CODE,
 			"Tunnel connection errored",
 		);
+		await this.removeSubdomainKeyFromKV();
 	}
 
 	private handleTunnelConnection(): Response {
@@ -1079,6 +1082,10 @@ export class HostcDurableObject extends DurableObject<Env> {
 			kind: "proxy",
 			requestId: requestTag.slice(PROXY_REQUEST_TAG_PREFIX.length),
 		};
+  }
+
+  private async removeSubdomainKeyFromKV() {
+    await this.env.KV.delete(getSubdomainKey(this.getTunnelSubdomain()));
 	}
 }
 

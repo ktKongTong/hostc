@@ -11,8 +11,10 @@ import { createSessionToken, verifySessionToken } from "./lib/session-token";
 import { canServeStaticAsset, serveStaticAsset } from "./lib/static-site";
 import {
 	buildTunnelWebSocketUrl,
-	createRandomSubdomain,
+  createDomainSuffix,
+  createRandomSubdomain,
 	extractTunnelSubdomain,
+  getSubdomainKey,
 } from "./lib/tunnels";
 
 const INTERNAL_CONNECT_PATH = "/_internal/connect";
@@ -81,7 +83,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 }
 
 async function createTunnel(env: Env, requestUrl: URL): Promise<Response> {
-	const subdomain = createRandomSubdomain();
+  const prefix = requestUrl.searchParams.get("subdomain");
+  const subdomain = await createSubdomain(env, prefix);
 	const tunnelSession = await issueTunnelSession(env, requestUrl, subdomain);
 	const response: CreateTunnelResponse = {
 		tunnelId: subdomain,
@@ -90,8 +93,28 @@ async function createTunnel(env: Env, requestUrl: URL): Promise<Response> {
 		websocketUrl: tunnelSession.websocketUrl,
 		sessionToken: tunnelSession.sessionToken,
 	};
-
 	return Response.json(response, { status: 201 });
+}
+
+async function createSubdomain(env: Env, prefix?: string | null): Promise<string> {
+  if (!prefix) {
+    prefix = createRandomSubdomain();
+  } else {
+    prefix = normalizeSubdomain(prefix);
+  }
+  let suffix = "";
+  let subdomain = `${prefix}${suffix}`;
+  while (true) {
+    const subDomainKey = getSubdomainKey(subdomain);
+    const existing = await env.KV.get(subDomainKey);
+    if (!existing) {
+      await env.KV.put(subDomainKey, "true");
+      break;
+    }
+    suffix = `-${createDomainSuffix()}`;
+    subdomain = `${prefix}${suffix}`;
+  }
+  return subdomain;
 }
 
 async function refreshTunnelSession(

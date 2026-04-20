@@ -6,6 +6,13 @@ import {
 export function createRandomSubdomain(): string {
 	return `t-${crypto.randomUUID().slice(0, 8)}`;
 }
+export function createDomainSuffix(): string {
+	return Math.random().toString(36).slice(2, 5);
+}
+
+export function getSubdomainKey(subdomain: string) {
+  return `subdomain:${subdomain}`;
+}
 
 export function extractTunnelSubdomain(
 	hostname: string,

@@ -23,6 +23,12 @@
 			}
 		]
 	},
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "<YOUR_KV_NAMESPACE_ID>"
+		}
+	],
 	"secrets": {
 		"required": ["TOKEN_SECRET"]
 	},
